@@ -49,6 +49,7 @@ public final class TapSdkTestActivity extends MainActivity {
     private AlertDialog dialog;
     private TapLeaderboard leaderboard;
     private TapLeaderboardDialog leaderboardDialog;
+    private boolean loginRequested;
     private boolean loginInProgress;
     private boolean profileLogin;
     private boolean refreshProfile;
@@ -57,7 +58,7 @@ public final class TapSdkTestActivity extends MainActivity {
     private boolean playable;
     private boolean resumed;
     private boolean stopped;
-    private boolean checkOnResume = true;
+    private boolean checkOnResume;
     private boolean trackLoginFlow;
     private boolean profileReadRecorded;
     private int profileRequest;
@@ -85,6 +86,7 @@ public final class TapSdkTestActivity extends MainActivity {
         stopped = false;
         resumed = true;
         enableTapDb();
+        if (!loginRequested) return;
         if (playable) allowGameplay();
         if (checkOnResume) {
             checkOnResume = false;
@@ -120,10 +122,11 @@ public final class TapSdkTestActivity extends MainActivity {
         }
         if (busy()) {
             Toast.makeText(this, R.string.tap_compliance_checking, Toast.LENGTH_SHORT).show();
-        } else if (hasConsent() && sdkInitialized && !privacy.getBoolean(LOGOUT_PENDING, false)
+        } else if (loginRequested && hasConsent() && sdkInitialized && !privacy.getBoolean(LOGOUT_PENDING, false)
                 && TapLoginHelper.getCurrentAccessToken() != null) {
             showAccount();
         } else {
+            loginRequested = true;
             enterOrLogin(true);
         }
     }
