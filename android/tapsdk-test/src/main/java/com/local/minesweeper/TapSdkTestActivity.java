@@ -8,10 +8,6 @@ import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
-import android.widget.Button;
-import android.widget.CheckBox;
-import android.widget.LinearLayout;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import com.tapsdk.antiaddiction.Config;
@@ -24,12 +20,17 @@ import com.taptap.sdk.RegionType;
 import com.taptap.sdk.TapLoginHelper;
 import com.taptap.sdk.net.Api.ApiCallback;
 import com.tds.common.TapCommon;
+import com.tds.tapdb.sdk.TapDB;
+
+import org.json.JSONObject;
 
 import java.lang.ref.WeakReference;
+import java.util.HashMap;
+import java.util.Map;
 
 public final class TapSdkTestActivity extends MainActivity {
     private static final String TAG = "MineSweeperTapSDK";
-    private static final int POLICY_VERSION = 5;
+    private static final int POLICY_VERSION = BuildConfig.PRIVACY_POLICY_VERSION;
     private static final Uri POLICY_URL = Uri.parse(BuildConfig.TAPTAP_PRIVACY_POLICY_URL);
     private static final String ACCEPTED_VERSION = "accepted_policy_version";
     private static final String LOGOUT_PENDING = "logout_pending";
@@ -42,6 +43,7 @@ public final class TapSdkTestActivity extends MainActivity {
     private static final int INVALID_CLIENT_OR_NETWORK_ERROR = 1200;
     private static final int REAL_NAME_STOP = 9002;
     private static boolean sdkInitialized;
+    private static boolean tapDbInitialized;
 
     private SharedPreferences privacy;
     private AlertDialog dialog;
@@ -56,30 +58,20 @@ public final class TapSdkTestActivity extends MainActivity {
     private boolean resumed;
     private boolean stopped;
     private boolean checkOnResume = true;
-    private int accountSession;
+    private boolean trackLoginFlow;
+    private boolean profileReadRecorded;
+    private int profileRequest;
     private int reopenLeaderboard = -1;
     private String complianceOpenId;
 
-    private final TapLoginHelper.TapLoginResultCallback loginCallback =
-            new TapLoginHelper.TapLoginResultCallback() {
-        @Override public void onLoginSuccess(AccessToken token) {
-            gameView().post(() -> completeLogin(token != null, token == null));
-        }
-
-        @Override public void onLoginCancel() {
-            runOnUiThread(() -> completeLogin(false, false));
-        }
-
-        @Override public void onLoginError(AccountGlobalError error) {
-            runOnUiThread(() -> completeLogin(false, true));
-        }
-    };
+    private TapLoginHelper.TapLoginResultCallback loginCallback;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         privacy = getSharedPreferences("tap_privacy", MODE_PRIVATE);
         gameView().setTapTapActions(BitmapFactory.decodeResource(getResources(), R.drawable.taptap_login),
-                this::openTapTap, this::showPrivacyPolicy);
+                this::openTapTap, this::openPolicy, this::togglePrivacy);
+        gameView().setPrivacyChecked(hasConsent());
         if (TapLeaderboard.configured()) {
             leaderboard = TapLeaderboard.get(this);
             gameView().setLeaderboardActions(() -> showLeaderboard(gameView().selectedLeaderboard()),
@@ -92,6 +84,7 @@ public final class TapSdkTestActivity extends MainActivity {
         super.onResume();
         stopped = false;
         resumed = true;
+        enableTapDb();
         if (playable) allowGameplay();
         if (checkOnResume) {
             checkOnResume = false;
@@ -115,15 +108,19 @@ public final class TapSdkTestActivity extends MainActivity {
 
     private void openTapTap() {
         if (hasOpenDialog()) return;
+        if (!gameView().isPrivacyChecked()) {
+            recordLoginFailure("entry", "privacy_unchecked");
+            Toast.makeText(this, R.string.tap_privacy_check_required, Toast.LENGTH_SHORT).show();
+            return;
+        }
         if (!isConfigured()) {
+            recordLoginFailure("entry", "missing_configuration");
             Toast.makeText(this, R.string.tap_login_unconfigured, Toast.LENGTH_SHORT).show();
             return;
         }
-        if (!hasConsent()) {
-            showConsent();
-        } else if (busy()) {
+        if (busy()) {
             Toast.makeText(this, R.string.tap_compliance_checking, Toast.LENGTH_SHORT).show();
-        } else if (sdkInitialized && !privacy.getBoolean(LOGOUT_PENDING, false)
+        } else if (hasConsent() && sdkInitialized && !privacy.getBoolean(LOGOUT_PENDING, false)
                 && TapLoginHelper.getCurrentAccessToken() != null) {
             showAccount();
         } else {
@@ -131,42 +128,18 @@ public final class TapSdkTestActivity extends MainActivity {
         }
     }
 
-    private void showConsent() {
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        int padding = Math.round(24 * getResources().getDisplayMetrics().density);
-        content.setPadding(padding, 0, padding, 0);
-
-        TextView explanation = new TextView(this);
-        explanation.setText(R.string.tap_privacy_explanation);
-        content.addView(explanation);
-
-        Button policy = new Button(this);
-        policy.setText(R.string.tap_privacy_open);
-        policy.setOnClickListener(view -> openPolicy());
-        content.addView(policy);
-
-        CheckBox agreement = new CheckBox(this);
-        agreement.setText(R.string.tap_privacy_accept);
-        content.addView(agreement);
-
-        dialog = new AlertDialog.Builder(this)
-                .setTitle(R.string.tap_login_title)
-                .setView(content)
-                .setNegativeButton(android.R.string.cancel, null)
-                .setPositiveButton(R.string.tap_login_continue, (prompt, which) -> {
-                    if (!agreement.isChecked()) return;
-                    privacy.edit().putInt(ACCEPTED_VERSION, POLICY_VERSION).apply();
-                    enterOrLogin(true);
-                })
-                .show();
-        Button continueButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-        continueButton.setEnabled(false);
-        agreement.setOnCheckedChangeListener((button, checked) -> continueButton.setEnabled(checked));
+    private void togglePrivacy() {
+        if (!hasConsent() && !busy()) gameView().setPrivacyChecked(!gameView().isPrivacyChecked());
     }
 
     private void enterOrLogin(boolean interactive) {
-        if (!hasConsent() || !isConfigured() || busy() || isFinishing() || isDestroyed()) return;
+        if ((!hasConsent() && !(interactive && gameView().isPrivacyChecked()))
+                || !isConfigured() || busy() || isFinishing() || isDestroyed()) return;
+        if (interactive) {
+            trackLoginFlow = true;
+            profileReadRecorded = false;
+        }
+        boolean signedIn = false;
         try {
             if (!sdkInitialized) {
                 TapCommon.setDurationStatisticsEnabled(false);
@@ -183,32 +156,58 @@ public final class TapSdkTestActivity extends MainActivity {
                         .build();
                 AntiAddictionUIKit.init(this, config);
             }
-            if (privacy.getBoolean(LOGOUT_PENDING, false) && !logout()) return;
-            boolean signedIn = TapLoginHelper.getCurrentAccessToken() != null;
+            if (privacy.getBoolean(LOGOUT_PENDING, false)) {
+                boolean tracked = trackLoginFlow;
+                if (!logout()) {
+                    if (tracked) recordLoginFailure("authorization", "logout_pending");
+                    return;
+                }
+                trackLoginFlow = tracked;
+            }
+            signedIn = hasConsent() && TapLoginHelper.getCurrentAccessToken() != null;
             gameView().setTapTapSignedIn(signedIn);
             if (signedIn) {
                 lockGameplay(R.string.tap_compliance_checking);
                 checkCurrentProfile();
             } else {
                 lockGameplay(R.string.tap_compliance_required);
-                if (interactive) {
-                    loginInProgress = true;
-                    TapLoginHelper.registerLoginCallback(loginCallback);
-                    TapLoginHelper.startTapLogin(this, TapLoginHelper.SCOPE_BASIC_INFO);
-                }
+                if (interactive) startAuthorization(TapLoginHelper.SCOPE_BASIC_INFO);
+                else finishLoginFailure("authorization", "missing_token");
             }
         } catch (RuntimeException | LinkageError failure) {
             Log.w(TAG, "TapTap login could not start: " + failure.getClass().getSimpleName());
             clearLoginCallback();
             profileInProgress = false;
+            finishLoginFailure(signedIn ? "profile" : "authorization", "startup_exception");
             lockGameplay(R.string.tap_login_failed);
         }
     }
 
-    private void completeLogin(boolean signedIn, boolean failed) {
-        if (!loginInProgress || !hasConsent() || isFinishing() || isDestroyed()) return;
+    private void startAuthorization(String scope) {
+        loginInProgress = true;
+        loginCallback = new TapLoginHelper.TapLoginResultCallback() {
+            @Override public void onLoginSuccess(AccessToken token) {
+                gameView().post(() -> completeLogin(this, token == null ? "missing_token" : null));
+            }
+
+            @Override public void onLoginCancel() {
+                runOnUiThread(() -> completeLogin(this, "cancelled"));
+            }
+
+            @Override public void onLoginError(AccountGlobalError error) {
+                runOnUiThread(() -> completeLogin(this, "sdk_error"));
+            }
+        };
+        TapLoginHelper.registerLoginCallback(loginCallback);
+        TapLoginHelper.startTapLogin(this, scope);
+    }
+
+    private void completeLogin(TapLoginHelper.TapLoginResultCallback callback, String failure) {
+        if (!loginInProgress || callback != loginCallback || isFinishing() || isDestroyed()) return;
         boolean wasProfileLogin = profileLogin;
         clearLoginCallback();
+        boolean signedIn = failure == null;
+        boolean failed = !signedIn && !"cancelled".equals(failure);
         if (wasProfileLogin) {
             if (failed) Toast.makeText(this, R.string.tap_login_failed, Toast.LENGTH_SHORT).show();
             refreshProfile = signedIn;
@@ -219,43 +218,56 @@ public final class TapSdkTestActivity extends MainActivity {
         }
         gameView().setTapTapSignedIn(signedIn);
         if (signedIn) {
+            if (!hasConsent()) privacy.edit().putInt(ACCEPTED_VERSION, POLICY_VERSION).apply();
+            gameView().setPrivacyChecked(true);
+            enableTapDb();
+            gameView().recordEvent("login_success");
             enterOrLogin(false);
-        } else if (failed) {
-            lockGameplay(R.string.tap_login_failed);
         } else {
-            lockGameplay(R.string.tap_compliance_required);
+            finishLoginFailure("authorization", failure);
+            lockGameplay(failed ? R.string.tap_login_failed : R.string.tap_compliance_required);
         }
     }
 
     private void checkCurrentProfile() {
         String openId = openId(TapLoginHelper.getCurrentProfile());
         if (!refreshProfile && openId != null) {
-            startCompliance(openId);
+            profileRead(openId);
             return;
         }
         refreshProfile = false;
-        int session = accountSession;
+        int request = ++profileRequest;
         profileInProgress = true;
         TapLoginHelper.fetchProfileForCurrentAccessToken(new ApiCallback<Profile>() {
             @Override public void onSuccess(Profile profile) {
-                runOnUiThread(() -> finishProfileCheck(session, profile));
+                runOnUiThread(() -> finishProfileCheck(request, profile, false));
             }
 
             @Override public void onError(Throwable failure) {
-                runOnUiThread(() -> finishProfileCheck(session, null));
+                runOnUiThread(() -> finishProfileCheck(request, null, true));
             }
         });
     }
 
-    private void finishProfileCheck(int session, Profile profile) {
-        if (session != accountSession || !hasConsent() || isFinishing() || isDestroyed()) return;
+    private void finishProfileCheck(int request, Profile profile, boolean failed) {
+        if (!profileInProgress || request != profileRequest || !hasConsent() || isFinishing() || isDestroyed()) return;
         profileInProgress = false;
         String openId = openId(profile);
         if (openId != null && TapLoginHelper.getCurrentAccessToken() != null) {
-            startCompliance(openId);
+            profileRead(openId);
         } else {
+            String reason = failed ? "read_error" : openId == null ? "missing_profile" : "missing_token";
+            finishLoginFailure("profile", reason);
             lockGameplay(R.string.tap_compliance_error);
         }
+    }
+
+    private void profileRead(String openId) {
+        if (trackLoginFlow && !profileReadRecorded) {
+            profileReadRecorded = true;
+            gameView().recordEvent("login_profile_success");
+        }
+        startCompliance(openId);
     }
 
     private void startCompliance(String openId) {
@@ -276,6 +288,7 @@ public final class TapSdkTestActivity extends MainActivity {
         } catch (RuntimeException | LinkageError failure) {
             complianceInProgress = false;
             Log.w(TAG, "TapTap compliance could not start: " + failure.getClass().getSimpleName());
+            finishLoginFailure("compliance", "startup_exception");
             lockGameplay(R.string.tap_compliance_error);
         }
     }
@@ -295,6 +308,8 @@ public final class TapSdkTestActivity extends MainActivity {
                 complianceInProgress = false;
                 if (checking && hasConsent() && TapLoginHelper.getCurrentAccessToken() != null
                         && complianceOpenId.equals(openId(TapLoginHelper.getCurrentProfile()))) {
+                    if (trackLoginFlow) gameView().recordEvent("login_compliance_success");
+                    trackLoginFlow = false;
                     gameView().setTapTapSignedIn(true);
                     if (stopped) {
                         checkOnResume = true;
@@ -303,40 +318,55 @@ public final class TapSdkTestActivity extends MainActivity {
                         if (resumed) allowGameplay();
                     }
                 } else if (checking) {
+                    finishLoginFailure("compliance", "session_invalid");
                     lockGameplay(R.string.tap_compliance_error);
                 }
                 break;
             case EXITED:
             case SWITCH_ACCOUNT:
+                if (checking) finishLoginFailure("compliance", code == EXITED ? "exited" : "switch_account");
                 complianceInProgress = false;
                 logout();
                 break;
             case PERIOD_RESTRICT:
-                showRestriction(R.string.tap_compliance_period);
+                showRestriction(R.string.tap_compliance_period, "period_restricted");
                 break;
             case DURATION_LIMIT:
-                showRestriction(R.string.tap_compliance_duration);
+                showRestriction(R.string.tap_compliance_duration, "duration_limit");
                 break;
             case AGE_LIMIT:
-                showRestriction(R.string.tap_compliance_age);
+                showRestriction(R.string.tap_compliance_age, "age_limit");
                 break;
             case INVALID_CLIENT_OR_NETWORK_ERROR:
-                showRestriction(R.string.tap_compliance_error);
+                showRestriction(R.string.tap_compliance_error, "client_or_network_error");
                 break;
             case REAL_NAME_STOP:
-                showRestriction(R.string.tap_compliance_cancelled);
+                showRestriction(R.string.tap_compliance_cancelled, "real_name_cancelled");
                 break;
             default:
                 Log.d(TAG, "TapTap compliance event " + code);
         }
     }
 
-    private void showRestriction(int message) {
+    private void showRestriction(int message, String reason) {
+        if (complianceInProgress) finishLoginFailure("compliance", reason);
         complianceInProgress = false;
         checkOnResume = false;
         reopenLeaderboard = -1;
         if (dialog != null) dialog.dismiss();
         lockGameplay(message);
+    }
+
+    private void finishLoginFailure(String stage, String reason) {
+        if (trackLoginFlow) recordLoginFailure(stage, reason);
+        trackLoginFlow = false;
+    }
+
+    private void recordLoginFailure(String stage, String reason) {
+        Map<String, Object> properties = new HashMap<>();
+        properties.put("stage", stage);
+        properties.put("reason", reason);
+        gameView().recordEvent("login_failed", properties);
     }
 
     private void lockGameplay(int message) {
@@ -389,11 +419,9 @@ public final class TapSdkTestActivity extends MainActivity {
         lockGameplay(R.string.tap_compliance_checking);
         try {
             profileLogin = true;
-            loginInProgress = true;
-            TapLoginHelper.registerLoginCallback(loginCallback);
-            TapLoginHelper.startTapLogin(this, TapLoginHelper.SCOPE_PUBLIC_PROFILE);
+            startAuthorization(TapLoginHelper.SCOPE_PUBLIC_PROFILE);
         } catch (RuntimeException | LinkageError failure) {
-            completeLogin(false, true);
+            completeLogin(loginCallback, "startup_exception");
         }
     }
 
@@ -412,6 +440,29 @@ public final class TapSdkTestActivity extends MainActivity {
         return privacy.getInt(ACCEPTED_VERSION, 0) == POLICY_VERSION;
     }
 
+    private void enableTapDb() {
+        if (!hasConsent() || !isConfigured()) return;
+        try {
+            if (!tapDbInitialized) {
+                TapDB.closeFetchTapTapDeviceId();
+                TapDB.init(getApplicationContext(), BuildConfig.TAPTAP_CLIENT_ID,
+                        null, BuildConfig.VERSION_NAME, true);
+                tapDbInitialized = true;
+            }
+            gameView().setEventReceiver(TapSdkTestActivity::trackTapDbEvent);
+        } catch (RuntimeException | LinkageError failure) {
+            Log.w(TAG, "TapDB initialization failed: " + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static void trackTapDbEvent(String event, Map<String, Object> properties) {
+        try {
+            TapDB.trackEvent(event, new JSONObject(properties));
+        } catch (LinkageError failure) {
+            throw new IllegalStateException("TapDB reporting failed", failure);
+        }
+    }
+
     private static String openId(Profile profile) {
         if (profile == null || profile.getOpenid() == null || profile.getOpenid().isEmpty()) return null;
         return profile.getOpenid();
@@ -426,7 +477,9 @@ public final class TapSdkTestActivity extends MainActivity {
         if (!loginInProgress) return;
         loginInProgress = false;
         profileLogin = false;
-        if (TapLoginHelper.getLoginCallback() == loginCallback) {
+        TapLoginHelper.TapLoginResultCallback callback = loginCallback;
+        loginCallback = null;
+        if (callback != null && TapLoginHelper.getLoginCallback() == callback) {
             TapLoginHelper.unregisterLoginCallback();
         }
     }
@@ -446,33 +499,10 @@ public final class TapSdkTestActivity extends MainActivity {
         dialog = account.show();
     }
 
-    private void showPrivacyPolicy() {
-        if (hasOpenDialog()) return;
-        if (!hasConsent()) {
-            openPolicy();
-            return;
-        }
-        dialog = new AlertDialog.Builder(this)
-                .setTitle(R.string.tap_privacy_title)
-                .setMessage(R.string.tap_privacy_saved)
-                .setNeutralButton(R.string.tap_privacy_open, (prompt, which) -> openPolicy())
-                .setNegativeButton(android.R.string.cancel, null)
-                .setPositiveButton(R.string.tap_privacy_revoke, (prompt, which) -> revokeConsent())
-                .show();
-    }
-
-    private void revokeConsent() {
-        boolean wasLoggingIn = loginInProgress;
-        privacy.edit().remove(ACCEPTED_VERSION).apply();
-        if (leaderboard != null) leaderboard.clearPendingScores();
-        gameView().clearRankedBoard();
-        logout();
-        if (wasLoggingIn) privacy.edit().putBoolean(LOGOUT_PENDING, true).apply();
-        Toast.makeText(this, R.string.tap_privacy_revoked, Toast.LENGTH_SHORT).show();
-    }
-
     private boolean logout() {
-        accountSession++;
+        profileRequest++;
+        trackLoginFlow = false;
+        profileReadRecorded = false;
         complianceOpenId = null;
         reopenLeaderboard = -1;
         refreshProfile = false;

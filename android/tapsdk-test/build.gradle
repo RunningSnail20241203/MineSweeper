@@ -30,6 +30,7 @@ android {
         buildConfigField 'String', 'TAPTAP_CLIENT_ID', JsonOutput.toJson(clientId)
         buildConfigField 'String', 'TAPTAP_REGION', JsonOutput.toJson(region)
         buildConfigField 'String', 'TAPTAP_PRIVACY_POLICY_URL', JsonOutput.toJson(policyUrl)
+        buildConfigField 'int', 'PRIVACY_POLICY_VERSION', providers.gradleProperty('minesweeperPrivacyPolicyVersion').get()
         buildConfigField 'String', 'TAPTAP_LEADERBOARD_CLIENT_TOKEN', JsonOutput.toJson(leaderboardToken)
         buildConfigField 'String', 'TAPTAP_LEADERBOARD_API_URL', JsonOutput.toJson(leaderboardUrl)
     }
@@ -107,6 +108,7 @@ dependencies {
             'libs/TapCommon_3.30.3.aar',
             'libs/TapLogin_3.30.3.aar',
             'libs/TapBootstrap_3.30.3.aar',
+            'libs/TapDB_3.30.3.aar',
             'libs/AntiAddiction_3.30.3.aar',
             'libs/AntiAddictionUI_3.30.3.aar'
     )

@@ -50,6 +50,14 @@ foreach ($tool in @($apksigner, $aapt2)) {
     if (!(Test-Path -LiteralPath $tool -PathType Leaf)) { throw "Missing Android SDK tool: $tool" }
 }
 
+$project = Join-Path $PSScriptRoot 'tapsdk-test'
+$versionPath = Join-Path $project 'gradle.properties'
+$policyVersionMatch = [regex]::Match([IO.File]::ReadAllText($versionPath),
+    '(?m)^minesweeperPrivacyPolicyVersion=(?<version>[1-9][0-9]*)(?=\r?$)')
+if (!$policyVersionMatch.Success) {
+    throw 'Set minesweeperPrivacyPolicyVersion in gradle.properties.'
+}
+$privacyPolicyVersion = $policyVersionMatch.Groups['version'].Value
 $policy = $null
 if (![Uri]::TryCreate($config.TAPTAP_PRIVACY_POLICY_URL, [UriKind]::Absolute, [ref]$policy) -or
         $policy.Scheme -ne 'https' -or !$policy.Host) {
@@ -60,8 +68,9 @@ try {
 } catch {
     throw "Could not verify the published privacy policy at $policy. $($_.Exception.Message)"
 }
-if ($policyPage.StatusCode -ne 200 -or $policyPage.Content -notmatch '\u653f\u7b56\u7248\u672c\s*[:\uff1a]\s*5(?:\D|$)') {
-    throw 'Publish the version 5 privacy policy before building the release APK.'
+$policyVersionPattern = '\u653f\u7b56\u7248\u672c\s*[:\uff1a]\s*' + $privacyPolicyVersion + '(?:\D|$)'
+if ($policyPage.StatusCode -ne 200 -or $policyPage.Content -notmatch $policyVersionPattern) {
+    throw "Publish the version $privacyPolicyVersion privacy policy before building the release APK."
 }
 
 if ($needsPassword.Count) {
@@ -76,8 +85,6 @@ if ($needsPassword.Count) {
     }
 }
 
-$project = Join-Path $PSScriptRoot 'tapsdk-test'
-$versionPath = Join-Path $project 'gradle.properties'
 $config.MINESWEEPER_KEYSTORE = $releaseKey
 $config.ANDROID_HOME = $SdkRoot
 $config.ANDROID_SDK_ROOT = $SdkRoot

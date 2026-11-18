@@ -25,6 +25,9 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,6 +38,7 @@ final class GameView extends View {
 
     interface RankStatus { void update(String text); }
     interface RankedWin { void submit(boolean noGuess, int preset, long time, RankStatus status); }
+    interface EventReceiver { void record(String event, Map<String, Object> properties); }
 
     private static final float WIDTH = 400;
     static final int INK = 0xff102720, DARK = 0xff17362d, PANEL = 0xff204238;
@@ -48,6 +52,7 @@ final class GameView extends View {
     private static final String[] LEVELS = { "初级", "中级", "高级", "自定义" };
     private static final int[][] PRESETS = { {9, 9, 10}, {16, 16, 40}, {16, 30, 99} };
     private static final int SAVE_VERSION = 1;
+    private static final String ROUND_START_RECORDED = "round_start_recorded";
     private static final long FLAG_HOLD_MILLIS = 320;
     private static final int DETAIL_CELL_SIZE = 20;
     private static final int OVERVIEW_CELL_SIZE = 4;
@@ -57,8 +62,11 @@ final class GameView extends View {
     private Bitmap tapTapLoginArtwork;
     private Runnable tapTapAccountAction;
     private Runnable privacyPolicyAction;
+    private Runnable privacyToggleAction;
+    private boolean privacyChecked;
     private Runnable leaderboardAction;
     private RankedWin rankedWin;
+    private EventReceiver eventReceiver;
     private String leaderboardAccount;
     private String boardOwner;
     private String leaderboardStatus;
@@ -86,6 +94,7 @@ final class GameView extends View {
     private int customMines = Minefield.minesForRate(customWidth, customHeight, customMineRate);
     private boolean noGuess, flagTool, running, mixingInput, boardFadeIn;
     private Minefield field;
+    private boolean roundStartRecorded;
     private long accumulated, started, entranceAt, resultAt, explosionAt, activeUntil, generationVersion;
     private long[] reveals = new long[0], flags = new long[0];
     private byte[] entryRings = new byte[0];
@@ -151,10 +160,19 @@ final class GameView extends View {
         setContentDescription(appName);
     }
 
-    void setTapTapActions(Bitmap loginArtwork, Runnable accountAction, Runnable privacyAction) {
+    void setTapTapActions(Bitmap loginArtwork, Runnable accountAction, Runnable privacyAction,
+                          Runnable togglePrivacy) {
         tapTapLoginArtwork = loginArtwork;
         tapTapAccountAction = accountAction;
         privacyPolicyAction = privacyAction;
+        privacyToggleAction = togglePrivacy;
+        invalidate();
+    }
+
+    boolean isPrivacyChecked() { return privacyChecked; }
+
+    void setPrivacyChecked(boolean checked) {
+        privacyChecked = checked;
         invalidate();
     }
 
@@ -171,6 +189,25 @@ final class GameView extends View {
 
     void setLeaderboardAccount(String account) {
         leaderboardAccount = account;
+    }
+
+    void setEventReceiver(EventReceiver receiver) {
+        eventReceiver = receiver;
+    }
+
+    void recordEvent(String event) {
+        recordEvent(event, Collections.emptyMap());
+    }
+
+    boolean recordEvent(String event, Map<String, Object> properties) {
+        if (eventReceiver == null) return false;
+        try {
+            eventReceiver.record(event, properties);
+            return true;
+        } catch (RuntimeException failure) {
+            android.util.Log.w("MineSweeper", "Event receiver failed", failure);
+            return false;
+        }
     }
 
     int selectedLeaderboard() {
@@ -293,7 +330,7 @@ final class GameView extends View {
         text(canvas, appName, WIDTH / 2, top - 16, 40, CREAM, true, true);
         text(canvas, entryStatus, WIDTH / 2, top + 25, 15, QUIET, false, true);
         drawTapTapEntry(canvas, top + 55, interactive);
-        button(canvas, 267, 22, 378, 64, "隐私协议", false, interactive, privacyPolicyAction);
+        drawPrivacyAgreement(canvas, top + 137, interactive);
     }
 
     private void drawHome(Canvas canvas, boolean interactive) {
@@ -302,8 +339,7 @@ final class GameView extends View {
         drawPattern(canvas, 217, top + 8);
         text(canvas, appName, 28, top + 72, 44, CREAM, true, false);
         if (tapTapAccountAction != null) {
-            button(canvas, 142, top - 12, 254, top + 29, "TapTap 账号", false, interactive, tapTapAccountAction);
-            button(canvas, 267, top - 12, 378, top + 29, "隐私协议", false, interactive, privacyPolicyAction);
+            button(canvas, 267, top - 12, 378, top + 29, "TapTap 账号", false, interactive, tapTapAccountAction);
         }
 
         float card = top + 117;
@@ -326,11 +362,11 @@ final class GameView extends View {
         if (field != null) {
             button(canvas, 22, card + 333, leaderboardAction == null ? 378 : 194, card + 383,
                     field.isOver() ? "查看上局" : "继续上局",
-                    false, interactive, this::showBoard);
+                    false, interactive, this::openSavedBoard);
         }
         if (leaderboardAction != null) {
             button(canvas, field == null ? 22 : 206, card + 333, 378, card + 383, "排行榜",
-                    false, interactive, leaderboardAction);
+                    false, interactive, this::openLeaderboard);
         }
     }
 
@@ -340,16 +376,54 @@ final class GameView extends View {
         float left = centerX - width / 2;
         float right = centerX + width / 2;
         float bottom = top + 50;
+        Runnable action = tapTapSignedIn || tapTapAccountAction == null ? tapTapAccountAction : this::clickLogin;
         if (tapTapSignedIn || tapTapLoginArtwork == null) {
             button(canvas, left, top, right, bottom, tapTapSignedIn ? "TapTap 账号" : "TapTap 登录",
-                    false, interactive, tapTapAccountAction);
+                    false, interactive, action);
             return;
         }
         float imageHeight = width * tapTapLoginArtwork.getHeight() / tapTapLoginArtwork.getWidth();
         float centerY = (top + bottom) / 2;
         canvas.drawBitmap(tapTapLoginArtwork, null, new RectF(left, centerY - imageHeight / 2,
                 right, centerY + imageHeight / 2), loginArtworkPaint);
-        if (interactive) hits.add(new Hit(new RectF(left, top, right, bottom), "TapTap 登录", tapTapAccountAction));
+        if (interactive && action != null) {
+            hits.add(new Hit(new RectF(left, top, right, bottom), "TapTap 登录", action));
+        }
+    }
+
+    private void clickLogin() {
+        recordEvent("login_click");
+        tapTapAccountAction.run();
+    }
+
+    private void drawPrivacyAgreement(Canvas canvas, float baseline, boolean interactive) {
+        if (privacyPolicyAction == null) return;
+        String agreement = "已阅读并同意";
+        String policy = "隐私协议";
+        float size = 16;
+        paint.setTypeface(Typeface.DEFAULT);
+        paint.setTextSize(size);
+        float agreementWidth = paint.measureText(agreement);
+        float policyWidth = paint.measureText(policy);
+        float left = (WIDTH - 26 - agreementWidth - policyWidth) / 2;
+        float textLeft = left + 26;
+        float linkLeft = textLeft + agreementWidth;
+        if (privacyChecked) {
+            round(canvas, left, baseline - 15, left + 18, baseline + 3, 4, MINT);
+            line(canvas, left + 4, baseline - 6, left + 8, baseline - 2, INK, 2);
+            line(canvas, left + 8, baseline - 2, left + 14, baseline - 10, INK, 2);
+        } else {
+            outline(canvas, left, baseline - 15, left + 18, baseline + 3, 4, QUIET, 1.5f);
+        }
+        text(canvas, agreement, textLeft, baseline, size, CREAM, false, false);
+        text(canvas, policy, linkLeft, baseline, size, MINT, false, false);
+        line(canvas, linkLeft, baseline + 3, linkLeft + policyWidth, baseline + 3, MINT, 1);
+        if (interactive) {
+            hits.add(new Hit(new RectF(left - 8, baseline - 25, linkLeft, baseline + 18),
+                    agreement, privacyToggleAction));
+            hits.add(new Hit(new RectF(linkLeft, baseline - 25, linkLeft + policyWidth + 8, baseline + 18),
+                    policy, privacyPolicyAction));
+        }
     }
 
     private void drawPattern(Canvas canvas, float x, float y) {
@@ -380,7 +454,10 @@ final class GameView extends View {
                     () -> chooseTool(false));
             button(canvas, 155, height - 95, 281, height - 43, "插旗", flagTool, interactive,
                     () -> chooseTool(true));
-            button(canvas, 291, height - 95, 380, height - 43, "全盘", false, interactive, this::startFit);
+            button(canvas, 291, height - 95, 380, height - 43, "全盘", false, interactive, () -> {
+                recordEvent("board_tool_click", Collections.singletonMap("tool", "overview"));
+                startFit();
+            });
             text(canvas, flagTool ? "点按插旗 · 点数字批量标雷" : "点按翻格 · 长按插旗 · 双指缩放",
                     WIDTH / 2, height - 20, 13, QUIET, false, true);
         }
@@ -577,7 +654,7 @@ final class GameView extends View {
         }
         boolean actionsEnabled = interactive && phase == 1;
         button(canvas, 35, y + 337, 365, y + 388, "再来一局", true, actionsEnabled,
-                () -> startBoard(field.columns, field.rows, field.mines, field.preset, field.noGuess, field.mineRate));
+                this::retryBoard);
         button(canvas, 35, y + 400, 365, y + 443, "查看棋盘", false, actionsEnabled, this::showBoard);
         canvas.restoreToCount(layer);
     }
@@ -845,6 +922,7 @@ final class GameView extends View {
     }
 
     private void chooseTool(boolean flag) {
+        recordEvent("board_tool_click", Collections.singletonMap("tool", flag ? "flag" : "reveal"));
         flagTool = flag;
         invalidate();
     }
@@ -914,6 +992,7 @@ final class GameView extends View {
                 : Minefield.rateForMines(customWidth, customHeight, customMines);
         dismissGameDialog();
         gameDialog = CustomBoardDialog.show(activity, customWidth, customHeight, rate, noGuess, (columns, rows, percent) -> {
+            recordEvent("custom_board_apply");
             customWidth = columns;
             customHeight = rows;
             customMineRate = percent;
@@ -925,16 +1004,26 @@ final class GameView extends View {
 
     private void newFromMenu() {
         if (!gameplayAllowed) return;
-        Runnable start = () -> {
-            int[] config = configuration();
-            startBoard(config[0], config[1], config[2], selection, noGuess, selection == 3 ? customMineRate : 0);
-        };
+        recordEvent("new_game_click");
         if (field != null && !field.isOver() && (field.state == Minefield.PLAYING || field.flags > 0)) {
             dismissGameDialog();
             gameDialog = new GameDialog(activity, "开始新游戏");
             gameDialog.addContent(GameDialog.text(activity, "开始新游戏会替换上局进度。", 15, CREAM, false), 12);
-            gameDialog.show("开始", start);
-        } else start.run();
+            gameDialog.show("开始", () -> {
+                recordEvent("replace_round_confirm");
+                startSelectedBoard("replace");
+            });
+        } else startSelectedBoard("new_game");
+    }
+
+    private void startSelectedBoard(String source) {
+        int[] config = configuration();
+        startBoard(config[0], config[1], config[2], selection, noGuess, selection == 3 ? customMineRate : 0, source);
+    }
+
+    private void retryBoard() {
+        recordEvent("retry_click");
+        startBoard(field.columns, field.rows, field.mines, field.preset, field.noGuess, field.mineRate, "retry");
     }
 
     private void dismissGameDialog() {
@@ -943,11 +1032,13 @@ final class GameView extends View {
         gameDialog = null;
     }
 
-    private void startBoard(int columns, int rows, int mines, int preset, boolean verified, int mineRate) {
+    private void startBoard(int columns, int rows, int mines, int preset, boolean verified, int mineRate,
+                            String source) {
         if (!gameplayAllowed) return;
         cancelGeneration();
         stopPress();
         field = new Minefield(columns, rows, mines, preset, verified, mineRate);
+        roundStartRecorded = false;
         boardOwner = isStandardBoard() ? leaderboardAccount : null;
         leaderboardStatus = null;
         prepareBoard();
@@ -962,6 +1053,7 @@ final class GameView extends View {
             mixingInput = true;
         }
         save();
+        recordEvent("board_enter", Collections.singletonMap("source", source));
     }
 
     private void prepareBoard() {
@@ -990,6 +1082,20 @@ final class GameView extends View {
         if (boardOwner != null && !boardOwner.equals(leaderboardAccount)) clearRankedBoard();
         if (started == 0 && running && field.state == Minefield.PLAYING) started = SystemClock.uptimeMillis();
         transition(Scene.BOARD);
+    }
+
+    private void openSavedBoard() {
+        if (!gameplayAllowed || field == null) return;
+        if (field.isOver()) recordEvent("view_last_round_click");
+        showBoard();
+        if (scene == Scene.BOARD && !field.isOver()) {
+            recordEvent("board_enter", Collections.singletonMap("source", "resume"));
+        }
+    }
+
+    private void openLeaderboard() {
+        recordEvent("leaderboard_click");
+        leaderboardAction.run();
     }
 
     private void showHome() {
@@ -1036,10 +1142,15 @@ final class GameView extends View {
                 activeUntil = Math.max(activeUntil, now + 240);
             }
         } else {
+            if (ready) roundStartRecorded = recordRoundEvent(false);
             long end = reveals.length == 0 ? now : animateReveal(cell, now);
             activeUntil = Math.max(activeUntil, end);
             if (field.isOver()) {
                 pauseClock();
+                if (roundStartRecorded) {
+                    roundStartRecorded = false;
+                    recordRoundEvent(true);
+                }
                 if (field.state == Minefield.LOST) {
                     explosionAt = now;
                     end = Math.max(end, now + 560);
@@ -1063,6 +1174,18 @@ final class GameView extends View {
             });
         }
         invalidate();
+    }
+
+    private boolean recordRoundEvent(boolean finished) {
+        if (eventReceiver == null) return false;
+        Map<String, Object> properties = new HashMap<>();
+        properties.put("difficulty", field.preset);
+        properties.put("no_guess", field.noGuess);
+        if (finished) {
+            properties.put("result", field.state == Minefield.WON ? "win" : "loss");
+            properties.put("duration_ms", accumulated);
+        }
+        return recordEvent(finished ? "round_end" : "round_start", properties);
     }
 
     private long animateReveal(int cell, long now) {
@@ -1179,8 +1302,12 @@ final class GameView extends View {
                 output.writeLong(elapsed(SystemClock.uptimeMillis()));
                 field.write(output);
             }
-            preferences.edit().putString("board", Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP))
-                    .putString("leaderboard_owner", field.isOver() ? null : boardOwner).apply();
+            SharedPreferences.Editor editor = preferences.edit()
+                    .putString("board", Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP))
+                    .putString("leaderboard_owner", field.isOver() ? null : boardOwner);
+            if (roundStartRecorded) editor.putBoolean(ROUND_START_RECORDED, true);
+            else editor.remove(ROUND_START_RECORDED);
+            editor.apply();
         } catch (IOException error) {
             android.util.Log.w("MineSweeper", "Failed to save board", error);
         }
@@ -1193,6 +1320,8 @@ final class GameView extends View {
             if (input.readInt() != SAVE_VERSION) return;
             long savedTime = input.readLong();
             field = Minefield.read(input);
+            roundStartRecorded = field.state == Minefield.PLAYING
+                    && preferences.getBoolean(ROUND_START_RECORDED, false);
             if (!field.isOver() && isStandardBoard()) {
                 boardOwner = preferences.getString("leaderboard_owner", null);
             }

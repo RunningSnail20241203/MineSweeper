@@ -119,10 +119,6 @@ final class TapLeaderboard {
         clearStorageUser();
     }
 
-    void clearPendingScores() {
-        pending.edit().clear().apply();
-    }
-
     void submit(boolean noGuess, int preset, long time, GameView.RankStatus status) {
         if (account == null || preset < 0 || preset > 2 || time <= 0) {
             status.update("本局未提交");

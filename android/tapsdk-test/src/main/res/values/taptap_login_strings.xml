@@ -1,19 +1,11 @@
 <resources>
-    <string name="tap_login_title">TapTap 登录</string>
-    <string name="tap_login_continue">继续登录</string>
     <string name="tap_login_success">已登录 TapTap</string>
     <string name="tap_login_failed">TapTap 登录失败，请检查网络后重试。</string>
     <string name="tap_login_unconfigured">此版本的 TapTap 登录尚未配置。</string>
     <string name="tap_account_title">TapTap 账号</string>
     <string name="tap_logout">退出登录</string>
     <string name="tap_logout_failed">退出登录失败，请重试。</string>
-    <string name="tap_privacy_title">隐私协议</string>
-    <string name="tap_privacy_explanation">请阅读简易扫雷隐私政策。游玩前需要 TapTap 登录并通过实名认证和防沉迷检查。</string>
-    <string name="tap_privacy_open">查看《简易扫雷隐私政策》</string>
-    <string name="tap_privacy_accept">我已阅读并同意《简易扫雷隐私政策》</string>
-    <string name="tap_privacy_saved">本机已记录隐私政策同意。</string>
-    <string name="tap_privacy_revoke">撤回同意</string>
-    <string name="tap_privacy_revoked">已撤回同意。再次游玩需要同意隐私政策并完成认证。</string>
+    <string name="tap_privacy_check_required">请先勾选「已阅读并同意隐私协议」。</string>
     <string name="tap_privacy_browser_unavailable">无法打开网页，请使用浏览器查看隐私政策。</string>
     <string name="tap_compliance_required">通过 TapTap 实名认证后即可游玩</string>
     <string name="tap_compliance_checking">正在确认可玩状态…</string>
