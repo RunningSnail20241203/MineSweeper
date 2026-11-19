@@ -57,13 +57,12 @@ public final class TapSdkTestActivity extends MainActivity {
     private boolean complianceInProgress;
     private boolean playable;
     private boolean resumed;
-    private boolean stopped;
-    private boolean checkOnResume;
     private boolean trackLoginFlow;
     private boolean profileReadRecorded;
     private int profileRequest;
     private int reopenLeaderboard = -1;
     private String complianceOpenId;
+    private String pendingComplianceOpenId;
 
     private TapLoginHelper.TapLoginResultCallback loginCallback;
 
@@ -83,14 +82,17 @@ public final class TapSdkTestActivity extends MainActivity {
 
     @Override protected void onResume() {
         super.onResume();
-        stopped = false;
         resumed = true;
         enableTapDb();
         if (!loginRequested) return;
-        if (playable) allowGameplay();
-        if (checkOnResume) {
-            checkOnResume = false;
-            if (hasConsent()) enterOrLogin(false);
+        if (playable) {
+            if (hasCurrentSession(complianceOpenId)) allowGameplay();
+            else logout();
+        } else if (pendingComplianceOpenId != null) {
+            String pendingOpenId = pendingComplianceOpenId;
+            pendingComplianceOpenId = null;
+            if (hasCurrentSession(pendingOpenId)) startCompliance(pendingOpenId);
+            else logout();
         }
     }
 
@@ -100,12 +102,8 @@ public final class TapSdkTestActivity extends MainActivity {
     }
 
     @Override protected void onStop() {
-        stopped = true;
         super.onStop();
-        if (playable) {
-            lockGameplay(R.string.tap_compliance_checking);
-            checkOnResume = true;
-        }
+        if (playable) suspendLeaderboard();
     }
 
     private void openTapTap() {
@@ -215,7 +213,6 @@ public final class TapSdkTestActivity extends MainActivity {
             if (failed) Toast.makeText(this, R.string.tap_login_failed, Toast.LENGTH_SHORT).show();
             refreshProfile = signedIn;
             if (TapLoginHelper.getCurrentAccessToken() == null) reopenLeaderboard = -1;
-            checkOnResume = !resumed;
             enterOrLogin(false);
             return;
         }
@@ -274,11 +271,11 @@ public final class TapSdkTestActivity extends MainActivity {
     }
 
     private void startCompliance(String openId) {
+        if (complianceInProgress) return;
         if (!resumed) {
-            checkOnResume = true;
+            pendingComplianceOpenId = openId;
             return;
         }
-        if (complianceInProgress) return;
         complianceOpenId = openId;
         complianceInProgress = true;
         try {
@@ -309,20 +306,15 @@ public final class TapSdkTestActivity extends MainActivity {
         switch (code) {
             case LOGIN_SUCCESS:
                 complianceInProgress = false;
-                if (checking && hasConsent() && TapLoginHelper.getCurrentAccessToken() != null
-                        && complianceOpenId.equals(openId(TapLoginHelper.getCurrentProfile()))) {
+                if (checking && hasCurrentSession(complianceOpenId)) {
                     if (trackLoginFlow) gameView().recordEvent("login_compliance_success");
                     trackLoginFlow = false;
                     gameView().setTapTapSignedIn(true);
-                    if (stopped) {
-                        checkOnResume = true;
-                    } else {
-                        playable = true;
-                        if (resumed) allowGameplay();
-                    }
+                    playable = true;
+                    if (resumed) allowGameplay();
                 } else if (checking) {
                     finishLoginFailure("compliance", "session_invalid");
-                    lockGameplay(R.string.tap_compliance_error);
+                    logout();
                 }
                 break;
             case EXITED:
@@ -354,7 +346,7 @@ public final class TapSdkTestActivity extends MainActivity {
     private void showRestriction(int message, String reason) {
         if (complianceInProgress) finishLoginFailure("compliance", reason);
         complianceInProgress = false;
-        checkOnResume = false;
+        pendingComplianceOpenId = null;
         reopenLeaderboard = -1;
         if (dialog != null) dialog.dismiss();
         lockGameplay(message);
@@ -374,10 +366,14 @@ public final class TapSdkTestActivity extends MainActivity {
 
     private void lockGameplay(int message) {
         playable = false;
+        suspendLeaderboard();
+        gameView().lockGameplay(getString(message));
+    }
+
+    private void suspendLeaderboard() {
         closeLeaderboard();
         if (leaderboard != null) leaderboard.suspend();
         gameView().setLeaderboardAccount(null);
-        gameView().lockGameplay(getString(message));
     }
 
     private void allowGameplay() {
@@ -471,6 +467,11 @@ public final class TapSdkTestActivity extends MainActivity {
         return profile.getOpenid();
     }
 
+    private boolean hasCurrentSession(String expectedOpenId) {
+        return expectedOpenId != null && hasConsent() && TapLoginHelper.getCurrentAccessToken() != null
+                && expectedOpenId.equals(openId(TapLoginHelper.getCurrentProfile()));
+    }
+
     private static boolean isConfigured() {
         return !BuildConfig.TAPTAP_CLIENT_ID.isEmpty() && "CN".equals(BuildConfig.TAPTAP_REGION)
                 && "https".equals(POLICY_URL.getScheme()) && POLICY_URL.getHost() != null;
@@ -510,7 +511,7 @@ public final class TapSdkTestActivity extends MainActivity {
         reopenLeaderboard = -1;
         refreshProfile = false;
         profileInProgress = false;
-        checkOnResume = false;
+        pendingComplianceOpenId = null;
         clearLoginCallback();
         if (dialog != null) dialog.dismiss();
         gameView().setTapTapSignedIn(false);
