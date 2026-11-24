@@ -1,15 +1,8 @@
-import groovy.json.JsonOutput
-
 plugins {
     id 'com.android.application' version '8.11.1'
 }
 
 def readEnvironment = { name -> providers.environmentVariable(name).orElse('').get() }
-def clientId = readEnvironment('TAPTAP_CLIENT_ID').trim()
-def region = providers.environmentVariable('TAPTAP_REGION').orElse('CN').get().trim()
-def policyUrl = readEnvironment('TAPTAP_PRIVACY_POLICY_URL').trim()
-def leaderboardToken = readEnvironment('TAPTAP_LEADERBOARD_CLIENT_TOKEN').trim()
-def leaderboardUrl = readEnvironment('TAPTAP_LEADERBOARD_API_URL').trim()
 def releaseKeystore = readEnvironment('MINESWEEPER_KEYSTORE')
 def releaseStorePassword = readEnvironment('MINESWEEPER_KEYSTORE_PASSWORD')
 def releaseKeyAlias = readEnvironment('MINESWEEPER_KEY_ALIAS')
@@ -26,17 +19,6 @@ android {
         targetSdk = 34
         versionCode = providers.gradleProperty('minesweeperVersionCode').get().toInteger()
         versionName = providers.gradleProperty('minesweeperVersionName').get()
-
-        buildConfigField 'String', 'TAPTAP_CLIENT_ID', JsonOutput.toJson(clientId)
-        buildConfigField 'String', 'TAPTAP_REGION', JsonOutput.toJson(region)
-        buildConfigField 'String', 'TAPTAP_PRIVACY_POLICY_URL', JsonOutput.toJson(policyUrl)
-        buildConfigField 'int', 'PRIVACY_POLICY_VERSION', providers.gradleProperty('minesweeperPrivacyPolicyVersion').get()
-        buildConfigField 'String', 'TAPTAP_LEADERBOARD_CLIENT_TOKEN', JsonOutput.toJson(leaderboardToken)
-        buildConfigField 'String', 'TAPTAP_LEADERBOARD_API_URL', JsonOutput.toJson(leaderboardUrl)
-    }
-
-    buildFeatures {
-        buildConfig = true
     }
 
     compileOptions {
@@ -67,6 +49,7 @@ android {
 
     sourceSets {
         main {
+            manifest.srcFile '../src/main/AndroidManifest.xml'
             java.srcDir '../src/main/java'
             res.srcDir '../src/main/res'
         }
@@ -76,8 +59,6 @@ android {
 def validateReleaseInputs = tasks.register('validateReleaseInputs') {
     doLast {
         def required = [
-            TAPTAP_CLIENT_ID: clientId,
-            TAPTAP_PRIVACY_POLICY_URL: policyUrl,
             MINESWEEPER_KEYSTORE: releaseKeystore,
             MINESWEEPER_KEYSTORE_PASSWORD: releaseStorePassword,
             MINESWEEPER_KEY_ALIAS: releaseKeyAlias,
@@ -85,11 +66,6 @@ def validateReleaseInputs = tasks.register('validateReleaseInputs') {
         ]
         def missing = required.findAll { name, value -> !value }.keySet()
         if (missing) throw new GradleException("Set environment variables for the release APK: ${missing.join(', ')}")
-        if (region != 'CN') throw new GradleException('The TapTap release APK requires TAPTAP_REGION=CN.')
-        def policyUri = URI.create(policyUrl)
-        if (policyUri.scheme != 'https' || !policyUri.host) {
-            throw new GradleException('TAPTAP_PRIVACY_POLICY_URL must be the published HTTPS policy URL.')
-        }
         def keystore = file(releaseKeystore).canonicalFile
         if (!keystore.isFile()) throw new GradleException('MINESWEEPER_KEYSTORE does not point to a keystore file.')
         if (keystore == file('../build/debug.keystore').canonicalFile ||
@@ -103,15 +79,3 @@ tasks.matching { it.name == 'preReleaseBuild' }.configureEach {
     dependsOn validateReleaseInputs
 }
 
-dependencies {
-    implementation files(
-            'libs/TapCommon_3.30.3.aar',
-            'libs/TapLogin_3.30.3.aar',
-            'libs/TapBootstrap_3.30.3.aar',
-            'libs/TapDB_3.30.3.aar',
-            'libs/AntiAddiction_3.30.3.aar',
-            'libs/AntiAddictionUI_3.30.3.aar'
-    )
-    implementation 'com.taptap:lc-storage-android:8.2.24'
-    implementation 'com.taptap:lc-realtime-android:8.2.24'
-}

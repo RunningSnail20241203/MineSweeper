@@ -6,16 +6,20 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$required = @('TAPTAP_CLIENT_ID', 'TAPTAP_PRIVACY_POLICY_URL', 'MINESWEEPER_KEYSTORE', 'MINESWEEPER_KEY_ALIAS')
-$configKeys = $required + @('TAPTAP_REGION', 'TAPTAP_LEADERBOARD_CLIENT_TOKEN',
-    'TAPTAP_LEADERBOARD_API_URL', 'MINESWEEPER_SIGNING_PASSWORD_FILE')
+$required = @('MINESWEEPER_KEYSTORE', 'MINESWEEPER_KEY_ALIAS')
+$configKeys = $required + @('MINESWEEPER_SIGNING_PASSWORD_FILE')
 $passwordKeys = @('MINESWEEPER_KEYSTORE_PASSWORD', 'MINESWEEPER_KEY_PASSWORD')
 $config = @{}
 $configPath = Join-Path $PSScriptRoot 'build\release.env'
 if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     foreach ($line in Get-Content -LiteralPath $configPath -Encoding UTF8) {
         if (!$line.Trim() -or $line.TrimStart().StartsWith('#')) { continue }
-        if ($line -notmatch '^\s*([A-Z_]+)\s*=(.*)$' -or $matches[1] -notin $configKeys) {
+        if ($line -notmatch '^\s*([A-Z_]+)\s*=(.*)$') {
+            throw 'Invalid setting in android/build/release.env.'
+        }
+        # Keep existing release.env files usable for their signing settings.
+        if ($matches[1] -like 'TAPTAP_*') { continue }
+        if ($matches[1] -notin $configKeys) {
             throw 'Invalid setting in android/build/release.env.'
         }
         $config[$matches[1]] = $matches[2].Trim()
@@ -27,8 +31,6 @@ foreach ($name in $configKeys + $passwordKeys) {
 }
 $missing = @($required | Where-Object { !$config[$_] })
 if ($missing.Count) { throw ('Missing release settings: ' + ($missing -join ', ')) }
-if (!$config.TAPTAP_REGION) { $config.TAPTAP_REGION = 'CN' }
-if ($config.TAPTAP_REGION -ne 'CN') { throw 'The TapTap release APK requires TAPTAP_REGION=CN.' }
 
 $releaseKey = (Resolve-Path -LiteralPath ([Environment]::ExpandEnvironmentVariables($config.MINESWEEPER_KEYSTORE))).Path
 $needsPassword = @($passwordKeys | Where-Object { !$config[$_] })
@@ -50,28 +52,8 @@ foreach ($tool in @($apksigner, $aapt2)) {
     if (!(Test-Path -LiteralPath $tool -PathType Leaf)) { throw "Missing Android SDK tool: $tool" }
 }
 
-$project = Join-Path $PSScriptRoot 'tapsdk-test'
+$project = Join-Path $PSScriptRoot 'app'
 $versionPath = Join-Path $project 'gradle.properties'
-$policyVersionMatch = [regex]::Match([IO.File]::ReadAllText($versionPath),
-    '(?m)^minesweeperPrivacyPolicyVersion=(?<version>[1-9][0-9]*)(?=\r?$)')
-if (!$policyVersionMatch.Success) {
-    throw 'Set minesweeperPrivacyPolicyVersion in gradle.properties.'
-}
-$privacyPolicyVersion = $policyVersionMatch.Groups['version'].Value
-$policy = $null
-if (![Uri]::TryCreate($config.TAPTAP_PRIVACY_POLICY_URL, [UriKind]::Absolute, [ref]$policy) -or
-        $policy.Scheme -ne 'https' -or !$policy.Host) {
-    throw 'TAPTAP_PRIVACY_POLICY_URL must be the published HTTPS policy URL.'
-}
-try {
-    $policyPage = Invoke-WebRequest -UseBasicParsing -Uri $policy -TimeoutSec 15
-} catch {
-    throw "Could not verify the published privacy policy at $policy. $($_.Exception.Message)"
-}
-$policyVersionPattern = '\u653f\u7b56\u7248\u672c\s*[:\uff1a]\s*' + $privacyPolicyVersion + '(?:\D|$)'
-if ($policyPage.StatusCode -ne 200 -or $policyPage.Content -notmatch $policyVersionPattern) {
-    throw "Publish the version $privacyPolicyVersion privacy policy before building the release APK."
-}
 
 if ($needsPassword.Count) {
     $secretFile = [Environment]::ExpandEnvironmentVariables($config.MINESWEEPER_SIGNING_PASSWORD_FILE)
@@ -147,7 +129,7 @@ try {
             "-PminesweeperVersionName=$versionName" assembleRelease
         if ($LASTEXITCODE) { throw 'Gradle assembleRelease failed.' }
 
-        $releaseApk = Join-Path $project 'build\outputs\apk\release\tapsdk-test-release.apk'
+        $releaseApk = Join-Path $project 'build\outputs\apk\release\minesweeper-release.apk'
         $certificate = & $apksigner verify --print-certs $releaseApk
         if ($LASTEXITCODE) { throw 'Release APK signature verification failed.' }
         if (($certificate -join "`n") -match '(?im)^Signer #\d+ certificate DN:\s*CN=Android Debug(?:,|$)') {
