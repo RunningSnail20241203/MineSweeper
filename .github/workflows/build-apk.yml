@@ -3,8 +3,8 @@ name: Build and Release APK
 on:
   push:
     tags:
-      - 'v*'          # 只有推送 v1.0、v1.0.1 这类 tag 时才触发
-  workflow_dispatch:   # 保留手动触发，方便测试
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -21,14 +21,19 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          build-root-directory: android
 
+      # 1. 进入 android/app 目录，给 gradlew 赋予执行权限
+      - name: Grant execute permission
+        run: chmod +x gradlew
+        working-directory: android/app
+
+      # 2. 进入 android/app 目录，使用自带的 ./gradlew 编译
       - name: Build debug APK
-        run: ./android/app/gradlew assembleDebug
-        working-directory: android
+        run: ./gradlew assembleDebug
+        working-directory: android/app
 
-      - name: Upload Artifact (可选)
+      # 3. 上传产物（路径不变）
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
@@ -37,9 +42,9 @@ jobs:
       - name: Create Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}   # 直接用你推送的 tag 名，如 v1.0
+          tag_name: ${{ github.ref_name }}
           name: "Release ${{ github.ref_name }}"
-          body: "由 GitHub Actions 自动编译生成的 APK"
+          body: "自动编译生成的 APK"
           files: android/app/build/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
