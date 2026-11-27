@@ -22,17 +22,21 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # 1. 进入 android/app 目录，给 gradlew 赋予执行权限
       - name: Grant execute permission
         run: chmod +x gradlew
         working-directory: android/app
 
-      # 2. 进入 android/app 目录，使用自带的 ./gradlew 编译
+      # 👇 新增：自动生成 debug.keystore 并放到正确的位置
+      - name: Generate debug keystore
+        run: |
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          mkdir -p android/build
+          mv debug.keystore android/build/debug.keystore
+
       - name: Build debug APK
         run: ./gradlew assembleDebug
         working-directory: android/app
 
-      # 3. 上传产物（路径不变）
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
